@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections;
 using System.IO;
+using System.Management;
 using System.Text;
 using CommandLine;
 using IniParser;
@@ -18,6 +19,13 @@ namespace winlogcheck
 		static public ProgramSettings currentSettings;
 		// time line for all events over the past day
 		static string whereTime = "";
+		// for store reading filter files errors
+		static string readFilterError = "";
+		// for store summary
+		static int totalLogs = 0;
+		static int totalErrors = 0;
+		static int totalWarnings = 0;
+		static int totalOther = 0;
 
 		static void Main(string[] args)
 		{
@@ -37,13 +45,25 @@ namespace winlogcheck
 				{
 					// Get specific report in specific eventlog
 					log.Info(String.Format("Mode: '{0}', filter: '{1}' in eventlog '{2}'", options.Mode, options.Filter, options.LogName));
-					getReportFilter(options.Mode, options.LogName, options.Filter);
+					ArrayList filters = readFilter(options.Mode, options.LogName, options.Filter);
+					if (filters.Count < 1)
+					{
+						Program.log.Error("WinLogCheck stop with error:" + Program.readFilterError);
+						Environment.Exit(2);
+					}
+					getEventsReport(options.Mode, options.LogName, filters);
 				}
 				else
 				{
 					// Get report in specific eventlog
 					log.Info(String.Format("Mode '{0}',  ALL filters in eventlog '{1}'", options.Mode, options.LogName));
-					getReportLog(options.Mode, options.LogName);
+					ArrayList filters = readFilter(options.Mode, options.LogName);
+					if (filters.Count < 1 && options.Mode == "include")
+					{
+						Program.log.Error("WinLogCheck stop with error: " + Program.readFilterError);
+						Environment.Exit(2);
+					}
+					getEventsReport(options.Mode, options.LogName, filters);
 				}
 			}
 			else
@@ -86,22 +106,6 @@ namespace winlogcheck
 			}
 		}
 
-		static void getReportFilter(string mode, string eventlog, string filter)
-		{
-			ArrayList filters = readFilter(mode, eventlog, filter);
-			getEvents(mode, eventlog, filters);
-		}
-
-		static void getReportLog(string mode, string eventlog)
-		{
-			ArrayList filters = readFilter(mode, eventlog);
-			getEvents(mode, eventlog, filters);
-		}
-
-		static void getReport(string mode, string eventlog)
-		{
-		}
-
 		static ArrayList readFilter(string mode, string eventlog, string filter = "")
 		{
 			// array to store filters
@@ -109,25 +113,12 @@ namespace winlogcheck
 			// get filename for filters
 			string filterFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, mode, eventlog + ".conf");
 			Program.log.Debug(String.Format("Read filter file \"{0}\"", filterFile));
-			// if usign filter and file not found - exit
-			// else return empty filters
 			if (!File.Exists(filterFile))
 			{
-				if (!String.IsNullOrWhiteSpace(filter))
-				{
-					Program.log.Error(String.Format("WinLogCheck stop: Cannot read {0}. Nothing do.", filterFile));
-					Environment.Exit(2);
-				}
-				else
-				{
-					Program.log.Warn(String.Format("Cannot read {0}. Filters DISABLED.", filterFile));
-					return filters;
-				}
-
+				Program.readFilterError = (String.Format("File not found '{0}'.", filterFile));
+				return filters;
 			}
 			// read INI-file
-			// if usign filter and file not read - exit
-			// else return empty filters
 			IniParser.FileIniDataParser iniParser = new FileIniDataParser();
 			iniParser.KeyValueDelimiter = ':';
 			IniData iniData = null;
@@ -137,45 +128,97 @@ namespace winlogcheck
 			}
 			catch (Exception ex)
 			{
-				if (!String.IsNullOrWhiteSpace(filter))
-				{
-					Program.log.Error(String.Format("WinLogCheck stop: Cannot read '{0}'. {1}", filterFile, ex));
-					Environment.Exit(2);
-				}
-				else
-				{
-					Program.log.Warn(String.Format("Cannot read {0}. Filters DISABLED. {1}", filterFile, ex));
-					return filters;
-				}
+				Program.readFilterError = String.Format("Cannot read file '{0}'. {1}", filterFile, ex);
+				return filters;
 			}
-			// if usign filter and it not read - exit
-			// else read all filters from file
 			if (!String.IsNullOrWhiteSpace(filter))
 			{
 				try
 				{
-					filters.Add(iniData["General"][filter]);
-					Program.log.Debug(String.Format("Use filter '{0}'", filter));
+					if (String.IsNullOrWhiteSpace(iniData["General"][filter]))
+					{
+						Program.readFilterError = String.Format("Filter '{0}' not found in '{1}'.", filter, filterFile);
+						return filters;
+					}
+					filters.Add("(" + iniData["General"][filter] + ")");
+					Program.log.Debug(String.Format("Use filter '{0}' : {1}", filter, iniData["General"][filter]));
 				}
 				catch (Exception ex)
 				{
-					Program.log.Error(String.Format("WinLogCheck stop: Cannot read filter '{0}'. {1}", filter, ex));
-					Environment.Exit(2);
+					Program.readFilterError = String.Format("Cannot read filter '{0}' in '{1}'. {2}", filter, filterFile, ex);
+					return filters;
 				}
 			}
 			else
 			{
 				foreach (KeyData key in iniData.Sections["General"])
 				{
-					filters.Add(key.Value);
+					filters.Add("(" + key.Value + ")");
 					Program.log.Debug(String.Format("Use filter '{0}' = {1}", key.KeyName, key.Value));
 				}
+				if (filters.Count < 1)
+					Program.readFilterError = "Filters empty.";
 			}
 			return filters;
 		}
 
-		static void getEvents(string mode, string log, ArrayList filters)
+		static string getEventsReport(string mode, string log, ArrayList filters)
 		{
+			// for store report
+			StringBuilder reportString = new StringBuilder();
+			// default query string
+			string queryString = String.Format("Select * From Win32_NTLogEvent Where LogFile = '{0}' and TimeGenerated >= '{1}'", log, Program.whereTime);
+			if (filters.Count > 0)
+			{
+				queryString = queryString + " AND ";
+				if (mode == "exclude")
+					queryString = queryString + " NOT ";
+				queryString = queryString + "(" + String.Join(" OR ", filters.ToArray()) + ")";
+			}
+			Program.log.Debug(String.Format("Query: {0}",queryString));
+
+			// get events
+			ManagementObjectSearcher evtSearcher = new ManagementObjectSearcher();
+			evtSearcher.Scope.Options.EnablePrivileges = true;
+			evtSearcher.Query = new ObjectQuery(queryString);
+
+			// format report
+			reportString.AppendLine("<table cellpadding=2 cellspacing=0 border=1 width=100%>");
+			reportString.AppendFormat("<caption style=\"font-size:120%;text-align:left;padding:10px;background:#eee\">Log name: <b>{0}</b></caption>", log);
+
+			int numberOfEvents = 0;
+
+			totalLogs++;
+
+			foreach (ManagementObject logEvent in evtSearcher.Get())
+			{
+				if (numberOfEvents == 0)
+				{
+					reportString.AppendLine("<tr><th align=center>(!)</th><th>Time</th><th>Source</th><th>Category</th><th>EventID</th><th>User</th></tr>");
+				}
+				Console.WriteLine("Event: {0}", ++numberOfEvents);
+				reportString.Append("<tr>");
+				//reportString.AppendFormat("<td>{0}</td>", logEvent["EventType"]);
+				switch (logEvent["EventType"].ToString())
+				{
+					case "2": totalErrors++; reportString.AppendFormat("<td bgcolor=red>{0}</td>", logEvent["EventType"]); break;
+					case "3": totalWarnings++; reportString.AppendFormat("<td bgcolor=yellow>{0}</td>", logEvent["EventType"]); break;
+					default: totalOther++; reportString.AppendFormat("<td>{0}</td>", logEvent["EventType"]); break;
+				}
+				reportString.AppendFormat("<td>{0}</td><td>{1}</td><td>{2}</td><td>{3}</td><td>{4}</td></tr>",
+					//DateTime.Parse(logEvent["TimeGenerated"].ToString()).ToLocalTime().ToString("hh:mm:ss"),
+					DateTime.ParseExact(logEvent["TimeGenerated"].ToString().Substring(0, 14), "yyyyMMddHHmmss", System.Globalization.CultureInfo.InvariantCulture).ToLocalTime().ToLongTimeString(),
+					//logEvent["TimeGenerated"].ToString().Substring(8, 14),
+					logEvent["SourceName"], logEvent["CategoryString"], logEvent["EventCode"], logEvent["User"]);
+				if (logEvent["Message"] != null)
+					reportString.AppendFormat("<tr><td></td><td colspan=5>{0}</td></tr>", logEvent["Message"].ToString().Replace("\r\n", "<br>"));
+				else
+					reportString.AppendFormat("<tr><td></td><td colspan=5>{0}</td></tr>", "none");
+			}
+			evtSearcher.Dispose();
+			if (numberOfEvents == 0) { reportString.Append("<tr><td colspan=6>NONE EVENTS</td></tr>"); }
+			reportString.AppendLine("</table>");
+			return reportString.ToString();
 		}
 	
 	}
