@@ -51,7 +51,8 @@ namespace winlogcheck
 						Program.log.Error("WinLogCheck stop with error:" + Program.readFilterError);
 						Environment.Exit(2);
 					}
-					getEventsReport(options.Mode, options.LogName, filters);
+					string eventsReport = getEventsReport(options.Mode, options.LogName, filters);
+					writeEventsReport(eventsReport, options.Mode, options.LogName, options.Filter);
 				}
 				else
 				{
@@ -63,7 +64,8 @@ namespace winlogcheck
 						Program.log.Error("WinLogCheck stop with error: " + Program.readFilterError);
 						Environment.Exit(2);
 					}
-					getEventsReport(options.Mode, options.LogName, filters);
+					string eventsReport = getEventsReport(options.Mode, options.LogName, filters);
+					writeEventsReport(eventsReport, options.Mode, options.LogName);
 				}
 			}
 			else
@@ -214,13 +216,49 @@ namespace winlogcheck
 					reportString.AppendFormat("<tr><td></td><td colspan=5>{0}</td></tr>", logEvent["Message"].ToString().Replace("\r\n", "<br>"));
 				else
 					reportString.AppendFormat("<tr><td></td><td colspan=5>{0}</td></tr>", "none");
+				reportString.AppendLine();
 			}
 			evtSearcher.Dispose();
 			if (numberOfEvents == 0) { reportString.Append("<tr><td colspan=6>NONE EVENTS</td></tr>"); }
 			reportString.AppendLine("</table>");
 			return reportString.ToString();
 		}
-	
+
+		static void writeEventsReport(string report, string mode, string eventlog = "", string filter = "")
+		{
+			string reportFile = getReportFileName(mode, eventlog, filter);
+			Program.log.Debug(String.Format("Write temporary report to '{0}'", reportFile));
+			StringBuilder reportString = new StringBuilder();
+			reportString.AppendLine("<!DOCTYPE html>");
+			reportString.AppendLine("");
+			reportString.AppendLine("<html><head><meta http-equiv=\"content-type\" content=\"text/html; charset=utf-8\" />");
+			reportString.AppendLine("<title>WinLogCheck Report</title></head><body>");
+			reportString.AppendFormat("<h1>{0}</h1>", System.Net.Dns.GetHostName());
+			reportString.AppendFormat("<b>{0}</b>", DateTime.Now);
+			reportString.AppendLine(report);
+			reportString.AppendLine("</body></html>");
+			try
+			{
+				System.IO.File.WriteAllText(reportFile, reportString.ToString());
+			}
+			catch
+			{
+				Program.log.Fatal(String.Format("WinLogCheck stop with error: Write temporary report to '{0}' failed", reportFile));
+				Environment.Exit(2);
+			}
+		}
+
+		private static string getReportFileName(string mode, string eventlog = "", string filter = "")
+		{
+			string reportFile = mode;
+			if (!String.IsNullOrWhiteSpace(eventlog))
+				reportFile = reportFile + "." + eventlog;
+			if (!String.IsNullOrWhiteSpace(filter))
+				reportFile = reportFile + "." + filter;
+			reportFile = reportFile + ".html";
+			reportFile = Path.Combine(currentSettings.ReportPath, reportFile);
+			return reportFile;
+		}
 	}
 
 	class Options
