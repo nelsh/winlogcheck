@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections;
+using System.Diagnostics;
 using System.IO;
 using System.Management;
 using System.Text;
@@ -41,11 +42,15 @@ namespace winlogcheck
 
 			if (!String.IsNullOrWhiteSpace(options.LogName))
 			{
+				///
+				/// If  specify filter
+				/// - Get specific report in specific eventlog
+				///
 				if (!String.IsNullOrWhiteSpace(options.Filter))
 				{
-					// Get specific report in specific eventlog
-					log.Info(String.Format("Mode: '{0}', filter: '{1}' in eventlog '{2}'", options.Mode, options.Filter, options.LogName));
+					log.Info(String.Format("Mode: '{0}', Filter: '{1}' in Eventlog '{2}'", options.Mode, options.Filter, options.LogName));
 					ArrayList filters = readFilter(options.Mode, options.LogName, options.Filter);
+					// if filter not found - exit
 					if (filters.Count < 1)
 					{
 						Program.log.Error("WinLogCheck stop with error:" + Program.readFilterError);
@@ -54,27 +59,55 @@ namespace winlogcheck
 					string eventsReport = getEventsReport(options.Mode, options.LogName, filters);
 					writeEventsReport(eventsReport, options.Mode, options.LogName, options.Filter);
 				}
+				///
+				/// If specify eventlog
+				/// - Get report in specific eventlog
+				///
 				else
 				{
-					// Get report in specific eventlog
-					log.Info(String.Format("Mode '{0}',  ALL filters in eventlog '{1}'", options.Mode, options.LogName));
 					ArrayList filters = readFilter(options.Mode, options.LogName);
+					log.Info(String.Format("Mode '{0}',  {1} Filters in Eventlog '{2}'", options.Mode, filters.Count, options.LogName));
+					// If mode include and filter not found - exit
 					if (filters.Count < 1 && options.Mode == "include")
 					{
 						Program.log.Error("WinLogCheck stop with error: " + Program.readFilterError);
 						Environment.Exit(2);
 					}
+					// add default filter for security eventlog
+					if (filters.Count < 1 && options.Mode == "exclude" && options.LogName.ToLower() == "security")
+						filters.Add("EventType < 4");
 					string eventsReport = getEventsReport(options.Mode, options.LogName, filters);
 					writeEventsReport(eventsReport, options.Mode, options.LogName);
 				}
 			}
+			///
+			/// Get full report
+			///
 			else
 			{
-				// Get full report
-				log.Info(String.Format("Mode '{0}', ALL filters in ALL eventlogs", options.Mode));
-			}
-			
+				StringBuilder eventsReport = new StringBuilder();
+				log.Info(String.Format("Mode '{0}', ALL Filters in ALL Eventlogs", options.Mode));
+				EventLog[] eventLogs = EventLog.GetEventLogs();
+				foreach (EventLog e in eventLogs)
+				{
+					ArrayList filters = readFilter(options.Mode, e.Log);
+					log.Info(String.Format(" - {0} Filters in Eventlog '{1}'", filters.Count, e.Log));
+					// If mode include and filter not found - skip 
+					if (filters.Count < 1 && options.Mode == "include")
+					{
+						string msg = String.Format("Eventlog {0} skip with warning: {1}", e.Log, Program.readFilterError);
+						Program.log.Warn(String.Format(" - - {0}", msg));
+						eventsReport.AppendLine(String.Format("<p><i>{0}</i></p>", msg));
+						continue;
+					}
+					// add default filter for security eventlog
+					if (filters.Count < 1 && options.Mode == "exclude" && e.Log.ToLower() == "security")
+						filters.Add("EventType < 4");
+					eventsReport.AppendLine(getEventsReport(options.Mode, e.Log, filters));
+					writeEventsReport(eventsReport.ToString(), options.Mode);
+				}
 
+			}
 			log.Info("WinLogCheck successfully");
 		}
 
@@ -208,9 +241,7 @@ namespace winlogcheck
 					default: totalOther++; reportString.AppendFormat("<td>{0}</td>", logEvent["EventType"]); break;
 				}
 				reportString.AppendFormat("<td>{0}</td><td>{1}</td><td>{2}</td><td>{3}</td><td>{4}</td></tr>",
-					//DateTime.Parse(logEvent["TimeGenerated"].ToString()).ToLocalTime().ToString("hh:mm:ss"),
 					DateTime.ParseExact(logEvent["TimeGenerated"].ToString().Substring(0, 14), "yyyyMMddHHmmss", System.Globalization.CultureInfo.InvariantCulture).ToLocalTime().ToLongTimeString(),
-					//logEvent["TimeGenerated"].ToString().Substring(8, 14),
 					logEvent["SourceName"], logEvent["CategoryString"], logEvent["EventCode"], logEvent["User"]);
 				if (logEvent["Message"] != null)
 					reportString.AppendFormat("<tr><td></td><td colspan=5>{0}</td></tr>", logEvent["Message"].ToString().Replace("\r\n", "<br>"));
