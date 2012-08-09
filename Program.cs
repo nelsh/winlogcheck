@@ -15,7 +15,7 @@ namespace winlogcheck
 	class Program
 	{
 		// Create instance for Nlog
-		static public Logger log = LogManager.GetLogger("msbplaunch");
+		static public Logger log = LogManager.GetLogger("winlogcheck");
 		// Instance for store command line arguments
 		static public Options options = new Options();
 		// struct for store program settings
@@ -227,7 +227,7 @@ namespace winlogcheck
 
 			// format report
 			reportString.AppendLine("<table>");
-			reportString.AppendFormat("<caption>Log name: <b>{0}</b></caption>", eventlog);
+			reportString.AppendFormat("<caption>Eventlog name: <b>{0}</b>, use {1} filters</caption>", eventlog, filters.Count);
 
 			int numberOfEvents = 0;
 
