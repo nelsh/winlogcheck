@@ -3,6 +3,8 @@ using System.Collections;
 using System.Diagnostics;
 using System.IO;
 using System.Management;
+using System.Net.Mail;
+using System.Net.Mime;
 using System.Text;
 using CommandLine;
 using IniParser;
@@ -58,6 +60,7 @@ namespace winlogcheck
 					}
 					string eventsReport = getEventsReport(options.Mode, options.LogName, filters);
 					writeEventsReport(eventsReport, options.Mode, options.LogName, options.Filter);
+					if (currentSettings.SendReport) sendSummaryReport(options.Mode, options.LogName, options.Filter);
 				}
 				///
 				/// If specify eventlog
@@ -75,9 +78,10 @@ namespace winlogcheck
 					}
 					// add default filter for security eventlog
 					if (filters.Count < 1 && options.Mode == "exclude" && options.LogName.ToLower() == "security")
-						filters.Add("EventType < 4");
+						filters.Add("EventType = 4");
 					string eventsReport = getEventsReport(options.Mode, options.LogName, filters);
 					writeEventsReport(eventsReport, options.Mode, options.LogName);
+					if (currentSettings.SendReport) sendSummaryReport(options.Mode, options.LogName);
 				}
 			}
 			///
@@ -102,12 +106,15 @@ namespace winlogcheck
 					}
 					// add default filter for security eventlog
 					if (filters.Count < 1 && options.Mode == "exclude" && e.Log.ToLower() == "security")
-						filters.Add("EventType < 4");
+						filters.Add("EventType = 4");
 					eventsReport.AppendLine(getEventsReport(options.Mode, e.Log, filters));
 					writeEventsReport(eventsReport.ToString(), options.Mode);
+					// Send summary report
+					if (currentSettings.SendReport) sendSummaryReport(options.Mode);
 				}
 
 			}
+
 			log.Info("WinLogCheck successfully");
 		}
 
@@ -156,6 +163,7 @@ namespace winlogcheck
 			// read INI-file
 			IniParser.FileIniDataParser iniParser = new FileIniDataParser();
 			iniParser.KeyValueDelimiter = ':';
+			iniParser.CommentDelimiter = '#';
 			IniData iniData = null;
 			try
 			{
@@ -197,12 +205,12 @@ namespace winlogcheck
 			return filters;
 		}
 
-		static string getEventsReport(string mode, string log, ArrayList filters)
+		static string getEventsReport(string mode, string eventlog, ArrayList filters)
 		{
 			// for store report
 			StringBuilder reportString = new StringBuilder();
 			// default query string
-			string queryString = String.Format("Select * From Win32_NTLogEvent Where LogFile = '{0}' and TimeGenerated >= '{1}'", log, Program.whereTime);
+			string queryString = String.Format("Select * From Win32_NTLogEvent Where LogFile = '{0}' and TimeGenerated >= '{1}'", eventlog, Program.whereTime);
 			if (filters.Count > 0)
 			{
 				queryString = queryString + " AND ";
@@ -218,8 +226,8 @@ namespace winlogcheck
 			evtSearcher.Query = new ObjectQuery(queryString);
 
 			// format report
-			reportString.AppendLine("<table cellpadding=2 cellspacing=0 border=1 width=100%>");
-			reportString.AppendFormat("<caption style=\"font-size:120%;text-align:left;padding:10px;background:#eee\">Log name: <b>{0}</b></caption>", log);
+			reportString.AppendLine("<table>");
+			reportString.AppendFormat("<caption>Log name: <b>{0}</b></caption>", eventlog);
 
 			int numberOfEvents = 0;
 
@@ -231,14 +239,17 @@ namespace winlogcheck
 				{
 					reportString.AppendLine("<tr><th align=center>(!)</th><th>Time</th><th>Source</th><th>Category</th><th>EventID</th><th>User</th></tr>");
 				}
-				Console.WriteLine("Event: {0}", ++numberOfEvents);
+				log.Trace("Event: {0} | Type: {1} | Time: {2}", ++numberOfEvents, logEvent["EventType"].ToString(), logEvent["TimeGenerated"].ToString());
 				reportString.Append("<tr>");
 				//reportString.AppendFormat("<td>{0}</td>", logEvent["EventType"]);
 				switch (logEvent["EventType"].ToString())
 				{
-					case "2": totalErrors++; reportString.AppendFormat("<td bgcolor=red>{0}</td>", logEvent["EventType"]); break;
-					case "3": totalWarnings++; reportString.AppendFormat("<td bgcolor=yellow>{0}</td>", logEvent["EventType"]); break;
-					default: totalOther++; reportString.AppendFormat("<td>{0}</td>", logEvent["EventType"]); break;
+					case "1": totalErrors++; reportString.AppendFormat("<td class=error>{0}</td>", "Error"); break;
+					case "2": totalWarnings++; reportString.AppendFormat("<td class=warning>{0}</td>", "Warning"); break;
+					case "3": totalOther++; reportString.AppendFormat("<td class=info>{0}</td>", "Info"); break;
+					case "4": totalOther++; reportString.AppendFormat("<td class=success>{0}</td>", "Success"); break;
+					case "5": totalErrors++; reportString.AppendFormat("<td class=failure>{0}</td>", "Failure"); break;
+					default: totalOther++; reportString.AppendFormat("<td>({0})</td>", logEvent["EventType"]); break;
 				}
 				reportString.AppendFormat("<td>{0}</td><td>{1}</td><td>{2}</td><td>{3}</td><td>{4}</td></tr>",
 					DateTime.ParseExact(logEvent["TimeGenerated"].ToString().Substring(0, 14), "yyyyMMddHHmmss", System.Globalization.CultureInfo.InvariantCulture).ToLocalTime().ToLongTimeString(),
@@ -259,13 +270,26 @@ namespace winlogcheck
 		{
 			string reportFile = getReportFileName(mode, eventlog, filter);
 			Program.log.Debug(String.Format("Write temporary report to '{0}'", reportFile));
+			StringBuilder titleString = new StringBuilder();
+			//titleString.AppendFormat("WinLogCheck Report - {0} - ", System.Net.Dns.GetHostName().ToUpper());
+			if (mode == "include")
+				titleString.Append("Mode: INCLUDE, ");
+			if (!String.IsNullOrWhiteSpace(eventlog))
+				titleString.AppendFormat("Eventlog: {0}, ", eventlog.ToUpper());
+			if (!String.IsNullOrWhiteSpace(filter))
+				titleString.AppendFormat("Filter: {0}, ", filter.ToUpper());
+			titleString.AppendFormat("Created: {0}", DateTime.Now);
 			StringBuilder reportString = new StringBuilder();
 			reportString.AppendLine("<!DOCTYPE html>");
 			reportString.AppendLine("");
 			reportString.AppendLine("<html><head><meta http-equiv=\"content-type\" content=\"text/html; charset=utf-8\" />");
-			reportString.AppendLine("<title>WinLogCheck Report</title></head><body>");
-			reportString.AppendFormat("<h1>{0}</h1>", System.Net.Dns.GetHostName());
-			reportString.AppendFormat("<b>{0}</b>", DateTime.Now);
+			reportString.AppendFormat("<style>{0}</style>", currentSettings.ReportCSS);
+			reportString.AppendFormat("<title>WinLogCheck Report - {0} - {1}</title></head><body>", 
+				System.Net.Dns.GetHostName().ToUpper(), titleString);
+			reportString.AppendFormat("<h1>WinLogCheck Report - <span class=servername>{0}</span></h1><div class=subhead>{1}</div>", 
+				System.Net.Dns.GetHostName().ToUpper(), titleString);
+			reportString.AppendFormat("<div class=subhead>Check: {0} logs (errors={1}, warnings={2}, other={3})</div><br>",
+				totalLogs, totalErrors, totalWarnings, totalOther);
 			reportString.AppendLine(report);
 			reportString.AppendLine("</body></html>");
 			try
@@ -276,6 +300,31 @@ namespace winlogcheck
 			{
 				Program.log.Fatal(String.Format("WinLogCheck stop with error: Write temporary report to '{0}' failed", reportFile));
 				Environment.Exit(2);
+			}
+		}
+
+		static void sendSummaryReport(string mode, string eventlog = "", string filter = "")
+		{
+			string reportFile = getReportFileName(mode, eventlog, filter);
+			string reportString = System.IO.File.ReadAllText(reportFile);
+
+			//  Send report ////
+			try
+			{
+				MailMessage mail = new MailMessage();
+				SmtpClient SmtpServer = new SmtpClient(Program.currentSettings.SMTP_Server);
+				mail.From = new MailAddress(Program.currentSettings.Mail_From);
+				mail.To.Add(Program.currentSettings.Mail_To);
+				mail.Subject = string.Format("Winlogcheck {0}: {1} logs (errors={2}, warnings={3}, other={4})</p>",
+					System.Net.Dns.GetHostName().ToUpper(), totalLogs, totalErrors, totalWarnings, totalOther);
+				mail.IsBodyHtml = true;
+				mail.Body = reportString;
+				SmtpServer.Send(mail);
+				log.Info("Successfully send summary report");
+			}
+			catch (Exception ex)
+			{
+				log.Warn(ex.ToString());
 			}
 		}
 
@@ -343,6 +392,7 @@ namespace winlogcheck
 		public string Mail_From;
 		public string Mail_To;
 		public bool SendReport;
+		public string ReportCSS;
 
 		public ProgramSettings(string iniFileName)
 		{
@@ -355,6 +405,7 @@ namespace winlogcheck
 			}
 			// read INI-file
 			IniParser.FileIniDataParser iniParser = new FileIniDataParser();
+			iniParser.CommentDelimiter = '#';
 			IniData iniData = null;
 			try
 			{
@@ -417,6 +468,13 @@ namespace winlogcheck
 				SendReport = false;
 				Program.log.Warn("Check mail settings. Send summary report DISABLED");
 			}
+			ReportCSS = "";
+			try
+			{
+				ReportCSS = iniData["General"]["ReportCSS"];
+			}
+			catch {}
+
 		}
 	}
 
