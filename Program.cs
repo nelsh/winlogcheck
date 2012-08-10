@@ -20,19 +20,17 @@ namespace winlogcheck
 		static public Options options = new Options();
 		// struct for store program settings
 		static public ProgramSettings currentSettings;
-		// time line for all events over the past day
-		static string whereTime = "";
 		// for store reading filter files errors
 		static string readFilterError = "";
 		// for store summary
 		static int totalLogs = 0;
+		static int totalEvents = 0;
 		static int totalErrors = 0;
 		static int totalWarnings = 0;
 		static int totalOther = 0;
 
 		static void Main(string[] args)
 		{
-			Program.whereTime = DateTime.UtcNow.AddDays(-1).ToString("yyyyMMdd HH:mm:ss");
 			log.Info("WinLogCheck start");
 
 			// Read and check command line arguments
@@ -108,13 +106,11 @@ namespace winlogcheck
 					if (filters.Count < 1 && options.Mode == "exclude" && e.Log.ToLower() == "security")
 						filters.Add("EventType = 4");
 					eventsReport.AppendLine(getEventsReport(options.Mode, e.Log, filters));
-					writeEventsReport(eventsReport.ToString(), options.Mode);
-					// Send summary report
-					if (currentSettings.SendReport) sendSummaryReport(options.Mode);
 				}
-
+				writeEventsReport(eventsReport.ToString(), options.Mode);
+				// Send summary report
+				if (currentSettings.SendReport) sendSummaryReport(options.Mode);
 			}
-
 			log.Info("WinLogCheck successfully");
 		}
 
@@ -209,8 +205,37 @@ namespace winlogcheck
 		{
 			// for store report
 			StringBuilder reportString = new StringBuilder();
+
+			// get total events in log
+			string countString = String.Format("Select * From Win32_NTLogEvent Where LogFile = '{0}' and TimeGenerated >= '{1}'", eventlog, currentSettings.WhereTime);
+			int events = 0;
+			try
+			{
+				ManagementObjectSearcher evtCounter = new ManagementObjectSearcher();
+				evtCounter.Scope.Options.EnablePrivileges = true;
+				evtCounter.Query = new ObjectQuery(countString);
+				events = evtCounter.Get().Count;
+				evtCounter.Dispose();
+			}
+			catch
+			{
+				log.Error(String.Format("Unable get events from '{0}' eventlog", eventlog));
+				reportString.AppendFormat("<table><caption class=error>Unable get events in <b>{0}</b></caption>", eventlog, filters.Count);
+				reportString.AppendLine("<tr><td colspan=6>EMPTY</td></tr></table>");
+				return reportString.ToString();
+			}
+			totalEvents += events;
+			totalLogs++;
+			log.Info(String.Format("Found {0} events in '{1}'", events, eventlog));
+			if (events == 0)
+			{
+				reportString.AppendFormat("<table><caption>Eventlog name: <b>{0}</b>, use {1} filters</caption>", eventlog, filters.Count);
+				reportString.AppendLine("<tr><td colspan=6>EMPTY</td></tr></table>");
+				return reportString.ToString();
+			}
+
 			// default query string
-			string queryString = String.Format("Select * From Win32_NTLogEvent Where LogFile = '{0}' and TimeGenerated >= '{1}'", eventlog, Program.whereTime);
+			string queryString = String.Format("Select * From Win32_NTLogEvent Where LogFile = '{0}' and TimeGenerated >= '{1}'", eventlog, currentSettings.WhereTime);
 			if (filters.Count > 0)
 			{
 				queryString = queryString + " AND ";
@@ -225,14 +250,11 @@ namespace winlogcheck
 			evtSearcher.Scope.Options.EnablePrivileges = true;
 			evtSearcher.Query = new ObjectQuery(queryString);
 
+
 			// format report
 			reportString.AppendLine("<table>");
-			reportString.AppendFormat("<caption>Eventlog name: <b>{0}</b>, use {1} filters</caption>", eventlog, filters.Count);
-
+			reportString.AppendFormat("<caption>Eventlog name: <b>{0}</b>, use {1} filters. Check {2} events.</caption>", eventlog, filters.Count, events);
 			int numberOfEvents = 0;
-
-			totalLogs++;
-
 			foreach (ManagementObject logEvent in evtSearcher.Get())
 			{
 				if (numberOfEvents == 0)
@@ -284,12 +306,12 @@ namespace winlogcheck
 			reportString.AppendLine("");
 			reportString.AppendLine("<html><head><meta http-equiv=\"content-type\" content=\"text/html; charset=utf-8\" />");
 			reportString.AppendFormat("<style>{0}</style>", currentSettings.ReportCSS);
-			reportString.AppendFormat("<title>WinLogCheck Report - {0} - {1}</title></head><body>", 
-				System.Net.Dns.GetHostName().ToUpper(), titleString);
+			reportString.AppendFormat("<title>WinLogCheck Report - {0} - Found {1} events {2}</title></head><body>", 
+				System.Net.Dns.GetHostName().ToUpper(), totalEvents, titleString);
 			reportString.AppendFormat("<h1>WinLogCheck Report - <span class=servername>{0}</span></h1><div class=subhead>{1}</div>", 
 				System.Net.Dns.GetHostName().ToUpper(), titleString);
-			reportString.AppendFormat("<div class=subhead>Check: {0} logs (errors={1}, warnings={2}, other={3})</div><br>",
-				totalLogs, totalErrors, totalWarnings, totalOther);
+			reportString.AppendFormat("<div class=subhead>Checked {0} events in {1} logs within the last {2} hours (errors={3}, warnings={4}, other={5})</div><br>",
+				totalEvents, totalLogs, currentSettings.TimePeriod, totalErrors, totalWarnings, totalOther);
 			reportString.AppendLine(report);
 			reportString.AppendLine("</body></html>");
 			try
@@ -315,8 +337,8 @@ namespace winlogcheck
 				SmtpClient SmtpServer = new SmtpClient(Program.currentSettings.SMTP_Server);
 				mail.From = new MailAddress(Program.currentSettings.Mail_From);
 				mail.To.Add(Program.currentSettings.Mail_To);
-				mail.Subject = string.Format("Winlogcheck {0}: {1} logs (errors={2}, warnings={3}, other={4})</p>",
-					System.Net.Dns.GetHostName().ToUpper(), totalLogs, totalErrors, totalWarnings, totalOther);
+				mail.Subject = string.Format("Winlogcheck {0}: total {1} events in {2} logs within the last {3} hours (errors={4}, warnings={5}, other={6})",
+					System.Net.Dns.GetHostName().ToUpper(), totalEvents, totalLogs, currentSettings.TimePeriod, totalErrors, totalWarnings, totalOther);
 				mail.IsBodyHtml = true;
 				mail.Body = reportString;
 				SmtpServer.Send(mail);
@@ -393,6 +415,8 @@ namespace winlogcheck
 		public string Mail_To;
 		public bool SendReport;
 		public string ReportCSS;
+		public int TimePeriod;
+		public string WhereTime;
 
 		public ProgramSettings(string iniFileName)
 		{
@@ -474,7 +498,29 @@ namespace winlogcheck
 				ReportCSS = iniData["General"]["ReportCSS"];
 			}
 			catch {}
-
+			string sTimePeriod = "";
+			try
+			{
+				sTimePeriod = iniData["General"]["TimePeriod"];
+			}
+			catch { }
+			if (String.IsNullOrWhiteSpace(sTimePeriod))
+			{
+				TimePeriod = 24;
+			}
+			else
+			{
+				try
+				{
+					TimePeriod = Convert.ToInt32(sTimePeriod);
+				}
+				catch
+				{
+					TimePeriod = 24;
+				}
+			}
+			Program.log.Info(String.Format("Get report for last {0} hours", TimePeriod.ToString()));
+			WhereTime = DateTime.UtcNow.AddHours(-TimePeriod).ToString("yyyyMMdd HH:mm:ss");
 		}
 	}
 
